@@ -118,21 +118,25 @@ class CANViewer(QWidget):
 
     def setLabelTextColor(self):
         for id in self.labelDic:
-            color = 'white'
-
-            if self.valueChangedCount[id] > 0:
-                self.valueChangedCount[id] -= 1
-                color = 'red'
 
             label = self.labelDic[id]
-            label[1].setStyleSheet(f'color: {color}')
-            label[2].setStyleSheet(f'color: {color}')
+            for idx in range(len(self.valueChangedCount[id])):
+                self.valueChangedCount[id][idx] -= 1
+
+                if self.valueChangedCount[id][idx] > 0:
+                    color = 'red'
+                else:
+                    color = 'white'
+
+                label[1][idx].setStyleSheet(f'color: {color}')
 
     @pyqtSlot(np.ndarray)
     def updatePacket(self, packet_list):
         for packet in packet_list:
             id = packet[1]
+            DLC = int(packet[2])
             data = packet[3]
+            data_byte_list = data.split(' ')
             text = ''
             for byte in data.split(' '):
                 ch = chr(int('0x' + byte, 16))
@@ -146,50 +150,59 @@ class CANViewer(QWidget):
                 if len(self.labelDic) % self.ROW_MAX_LEN == 0:
                     id_label = QLabel('ID')
                     id_label.setStyleSheet("min-width: 40px")
+                    self.layout.addWidget(id_label, 0, self.columnIndex + 0)
 
-                    data_label = QLabel('Bytes')
-                    data_label.setStyleSheet("min-width: 170px")
+                    data_label_list = []
+                    for i in range(8):
+                        if i == 0:
+                            data_label = QLabel('Bytes')
+                        else:
+                            data_label = QLabel(' ')
+                        data_label.setStyleSheet("min-width: 20px")
+                        self.layout.addWidget(data_label, 0, self.columnIndex + i+1)
+                        data_label_list.append(data_label)
 
                     text_label = QLabel('Text')
                     text_label.setStyleSheet("min-width: 100px")
+                    self.layout.addWidget(text_label, 0, self.columnIndex + 9)
 
-                    self.layout.addWidget(id_label, 0, self.columnIndex + 0)
-                    self.layout.addWidget(data_label, 0, self.columnIndex + 1)
-                    self.layout.addWidget(text_label, 0, self.columnIndex + 2)
-                    self.columnIndex += 3
+                    self.columnIndex += 10
 
                 # 새로운 ID 추가
                 id_label = QLabel(id)
                 id_label.setStyleSheet("min-width: 40px")
 
-                data_label = QLabel(data)
-                data_label.setStyleSheet("min-width: 170px")
+                data_label_list = []
+                for data_byte in data_byte_list:
+                    data_label = QLabel(data_byte)
+                    data_label.setStyleSheet("min-width: 20px")
+                    data_label_list.append(data_label)
 
                 text_label = QLabel(text)
                 text_label.setStyleSheet("min-width: 100px")
 
-                self.labelDic[id] = [id_label, data_label, text_label]
-                self.valueChangedCount[id] = self.COLOR_MAINTAIN_LEN
+                self.labelDic[id] = [id_label, data_label_list, text_label]
+                self.valueChangedCount[id] = [self.COLOR_MAINTAIN_LEN for _ in range(DLC)]
 
                 # 정렬 및 Reformat
                 keys = sorted(self.labelDic.keys())
                 for idx, key in enumerate(keys):
                     row = idx % self.ROW_MAX_LEN + 1
-                    column = (idx // self.ROW_MAX_LEN) * 3
+                    column = (idx // self.ROW_MAX_LEN) * 10
 
                     label = self.labelDic[key]
                     self.layout.addWidget(label[0], row, column + 0)
-                    self.layout.addWidget(label[1], row, column + 1)
-                    self.layout.addWidget(label[2], row, column + 2)
+                    for i, data_label in enumerate(label[1]):
+                        self.layout.addWidget(data_label, row, column + i+1)
+                    self.layout.addWidget(label[2], row, column + 9)
             else:
                 # 텍스트 변경
-                data_label = self.labelDic[id][1]
+                for idx, data_label in enumerate(self.labelDic[id][1]):
+                    if data_label.text() != data_byte_list[idx]:
+                        self.valueChangedCount[id][idx] = self.COLOR_MAINTAIN_LEN
+                        data_label.setText(data_byte_list[idx])
+
                 text_label = self.labelDic[id][2]
-
-                if data_label.text() != data:
-                    self.valueChangedCount[id] = self.COLOR_MAINTAIN_LEN
-
-                data_label.setText(data)
                 text_label.setText(text)
 
         self.setLabelTextColor()
