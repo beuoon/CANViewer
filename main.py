@@ -67,6 +67,7 @@ class Loader(QThread):
                 try:
                     emit_msg = np.array(msg_list)
                 except:
+                    msg_list.clear()
                     continue
                 msg_list.clear()
                 self.emitter.emit(emit_msg)
