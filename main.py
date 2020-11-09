@@ -87,7 +87,7 @@ class Loader(QThread):
 class CANViewer(QWidget):
     ROW_MAX_LEN = 30
 
-    def __init__(self, color_maintain_time=3, init_time=60):
+    def __init__(self, color_maintain_time=3):
         '''CAN Viewer
 
         EMIT_INTERVAL = 0.1
@@ -106,12 +106,11 @@ class CANViewer(QWidget):
         self.printable = copy.deepcopy(string.printable)
         self.printable = self.printable[:self.printable.find('\t')]
 
-        self.BG_INIT_TIME = init_time
-        self.bgInitFlag = False
-        self.bgInitStartTime = -1
+        self.valueInitFlag = False
         self.bgColorMaintainTime = {}
         self.prevByte = {}
-        self.constFlag = {}
+        self.maxValue = {}
+        self.valueDelta = {}
 
         self.loader = Loader()
         self.loader.emitter.connect(self.updatePacket)
@@ -128,6 +127,14 @@ class CANViewer(QWidget):
         self.resize(400, 200)
         self.show()
 
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Space:
+            self.valueInitFlag = not self.valueInitFlag
+            for id in self.bgColorMaintainTime:
+                for idx in range(len(self.bgColorMaintainTime[id])):
+                    self.bgColorMaintainTime[id][idx] = 0
+            self.setLabelTextColor()
+
     def setLabelTextColor(self):
         current_time = time.perf_counter()
 
@@ -139,11 +146,17 @@ class CANViewer(QWidget):
                     color = 'red'
                 else:
                     color = 'white'
-                
-                if id in self.bgColorMaintainTime and self.bgColorMaintainTime[id][idx] > current_time:
+
+                if not self.valueInitFlag:
                     bg_color = 'green'
                 else:
-                    bg_color = 'black'
+                    if id in self.bgColorMaintainTime and self.bgColorMaintainTime[id][idx] > current_time:
+                        if self.valueDelta[id][idx] == 0:
+                            bg_color = 'green'
+                        else:
+                            bg_color = '#FF8C00'
+                    else:
+                        bg_color = 'black'
                 
                 data_label_list[idx].setStyleSheet(f'color: {color}; background-color: {bg_color}')
 
@@ -163,33 +176,38 @@ class CANViewer(QWidget):
                 else:
                     text += '.'
 
-            # Background Color
-            if self.bgInitStartTime == -1:
-                self.bgInitStartTime = time.perf_counter()
-                self.bgInitFlag = False
-
             # 데이터 변동 확인
-            if not self.bgInitFlag:
-                if id not in self.prevByte:
-                    maintain_end_time = self.bgInitStartTime + self.BG_INIT_TIME
-                    self.constFlag[id] = [True for _ in range(DLC)]
-                    self.bgColorMaintainTime[id] = [maintain_end_time for _ in range(DLC)]
+            if not self.valueInitFlag:
+                if id not in self.bgColorMaintainTime:
+                    self.bgColorMaintainTime[id] = [0 for _ in range(DLC)]
+                    self.valueDelta[id] = [0 for _ in range(DLC)]
+                    self.maxValue[id] = [int('0x'+byte, 16) for byte in data_byte_list]
                 else:
                     for idx in range(DLC):
-                        if data_byte_list[idx] != self.prevByte[id][idx]:
-                            self.constFlag[id][idx] = False
-                self.prevByte[id] = data_byte_list
+                        max_value = self.maxValue[id][idx]
+                        prev_value = int('0x'+self.prevByte[id][idx], 16)
+                        curr_value = int('0x'+data_byte_list[idx], 16)
+                        delta = abs(curr_value - prev_value)
 
-                if time.perf_counter()-self.bgInitStartTime > self.BG_INIT_TIME:
-                    self.bgInitFlag = True
+                        if delta > self.valueDelta[id][idx]:
+                            self.valueDelta[id][idx] = delta
+                        if curr_value > max_value:
+                            self.maxValue[id][idx] = curr_value
 
             # 데이터 변동에 따라 배경색 변경
             else:
-                if id in self.constFlag:
+                if id in self.bgColorMaintainTime:
                     maintain_end_time = time.perf_counter() + self.COLOR_MAINTAIN_TIME
                     for idx in range(DLC):
-                        if self.constFlag[id][idx] and data_byte_list[idx] != self.prevByte[id][idx]:
+                        max_value = self.maxValue[id][idx]
+                        prev_value = int('0x'+self.prevByte[id][idx], 16)
+                        curr_value = int('0x'+data_byte_list[idx], 16)
+                        delta = abs(curr_value - prev_value)
+                        init_delta = self.valueDelta[id][idx]
+
+                        if delta > init_delta*1.2 or init_delta == 0 and max_value != curr_value:  # or max_value < curr_value:
                             self.bgColorMaintainTime[id][idx] = maintain_end_time
+            self.prevByte[id] = data_byte_list
 
             # 새로운 컬럼 추가 및 포맷 정렬
             if id not in self.labelDic:
@@ -269,6 +287,6 @@ if __name__ == '__main__':
     else:
         init_time = 30
 
-    ex = CANViewer(color_maintain_time=3, init_time=init_time)
+    ex = CANViewer(color_maintain_time=3)
 
     sys.exit(app.exec_())
