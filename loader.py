@@ -1,67 +1,160 @@
-import pandas as pd
 from tqdm import tqdm
+from socket import *
+import pandas as pd
+import threading
+import datetime
 import time
-import socket
 import sys
 
-
 class FileLoader:
-    HOST = '127.0.0.1'
-    PORT = 45555
+    def __init__(self, file_path, save_path, run_speed):
+        self.HOST = '127.0.0.1'
+        self.VIEWER_PORT = 45555
+        self.ATTACK_PORT = 45556
+        self.ATTACKER_VIEW_PORT = 45557
+        self.BUFF_SIZE = 8192
 
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_socket.connect((HOST, PORT))
+        self.viewer_socket = socket(AF_INET, SOCK_STREAM)
+        self.viewer_socket.connect((self.HOST, self.VIEWER_PORT))
 
-    csvPath = None
+        self.attackServerSocket = socket(AF_INET, SOCK_STREAM)
+        self.attackServerSocket.bind((self.HOST, self.ATTACK_PORT))
+        self.attackServerSocket.listen(1)
 
-    runSpeed = 0.05
+        self.attackSocket = None
+        self.attackerViewSocket = None
+        self.recvThread = threading.Thread(target=FileLoader.RecvFunc, args=(self,))
+        self.recvDataList = []
 
-    EMIT_INTERVAL = 0.1
-    PACKET_INTERVAL = EMIT_INTERVAL * runSpeed
-
-    def setFilePath(self, file_path):
         self.csvPath = file_path
-
-    def setRunSpeed(self, run_speed):
+        self.savePath = save_path
         self.runSpeed = run_speed
-        self.PACKET_INTERVAL = self.EMIT_INTERVAL * self.runSpeed
+
+        self.bRun = False
+
+    @staticmethod
+    def RecvFunc(file_loader):
+        prev_data = ''
+
+        while file_loader.bRun:
+            try:
+                encoded_packet = file_loader.attackSocket.recv(file_loader.BUFF_SIZE)
+                if encoded_packet == b'':
+                    raise Exception('closed')
+
+                packet = encoded_packet.decode()
+                data_list = packet.splitlines()
+
+                if len(data_list) == 0:
+                    continue
+
+                data_list[0] = prev_data + data_list[0]
+                prev_data = ''
+
+                for data in data_list[:-1]:
+                    msg = data.split(',')
+                    file_loader.recvDataList.append(msg)
+
+                data = data_list[-1]
+                if packet[-1] != '\n':
+                    prev_data = data
+                else:
+                    msg = data.split(',')
+                    file_loader.recvDataList.append(msg)
+
+            except:
+                viewSocket = file_loader.attackerViewSocket
+                file_loader.attackerViewSocket = None
+                if viewSocket is not None:
+                    viewSocket.close()
+
+                if file_loader.attackSocket is not None:
+                    file_loader.attackSocket.close()
+                file_loader.attackSocket = None
+
+                try:
+                    file_loader.attackSocket, _ = file_loader.attackServerSocket.accept()
+
+                    viewSocket = socket(AF_INET, SOCK_STREAM)
+                    viewSocket.connect((file_loader.HOST, file_loader.ATTACKER_VIEW_PORT))
+                    file_loader.attackerViewSocket = viewSocket
+                except:
+                    pass
 
     def run(self):
         if self.csvPath is None:
             return
-
         df = pd.read_csv(self.csvPath)
-
         values = df.values
-        packet_len = len(df.index)
 
-        pbar = tqdm(total=packet_len)
+        save_file = None
+        if self.savePath is not None:
+            try:
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H.%M.%S')
+                save_file = open(self.savePath + '_' + ts + '.csv', 'wt')
+                save_file.write('Timestamp,Arbitration_ID,DLC,Data,Class\n')
+            except Exception as e:
+                print(e)
+                self.attackServerSocket.close()
+                return
 
-        prev_timestamp = values[0][0]
+        # 시작
+        self.bRun = True
+        self.recvThread.start()
 
-        prev_emit_time = time.time()
-        prev_idx = 0
+        values_len = len(values)
+        pbar = tqdm(total=values_len)
+
+        start_time = time.perf_counter()
+        start_timestamp = values[0][0]
         idx = 0
-        while idx < packet_len:
-            while idx < packet_len:
-                timestamp = values[idx][0]
-                if timestamp > prev_timestamp + self.PACKET_INTERVAL:
-                    break
-                record = '{},{},{},'.format(values[idx][0], values[idx][1], values[idx][2])
-                record += values[idx][3] + '\n'
-                self.client_socket.sendall(record.encode())
+
+        while idx < values_len:
+            current_time = time.perf_counter()
+
+            value = None
+            dataClass = 'Normal'
+
+            # 파일에서 가져오기
+            if current_time - start_time >= (values[idx][0] - start_timestamp) / self.runSpeed:
+                value = values[idx]
+
+                pbar.update(1)
                 idx += 1
+            # 소켓에서 가져오기
+            else:
+                if len(self.recvDataList) > 0:
+                    value = self.recvDataList[0]
+                    dataClass = 'Attack'
+                    self.recvDataList = self.recvDataList[1:]
 
-            pbar.update(idx-prev_idx+1)
-            prev_idx = idx + 1
-            prev_timestamp = prev_timestamp + self.PACKET_INTERVAL
+            # 전송
+            if value is not None:
+                data = '{},{},{},{},{}\n'.format(current_time - start_time, value[1], value[2], value[3], dataClass)
+                encoded_data = data.encode()
+                try:
+                    self.viewer_socket.sendall(encoded_data)
+                except Exception as e:
+                    break
 
-            elapse_time = time.time() - prev_emit_time
-            prev_emit_time = time.time()
-            if elapse_time < self.EMIT_INTERVAL:
-                time.sleep(self.EMIT_INTERVAL - elapse_time)
+                if self.attackerViewSocket is not None:
+                    try:
+                        self.attackerViewSocket.sendall(encoded_data)
+                    except Exception as e:
+                        self.attackerViewSocket = None
+                if save_file is not None:
+                    save_file.write(data)
+                    save_file.flush()
 
+        # 종료
         pbar.close()
+        print("종료")
+        if save_file is not None:
+            save_file.close()
+        self.bRun = False
+        self.attackServerSocket.close()
+        if self.attackSocket is not None:
+            self.attackSocket.close()
 
 
 if __name__ == '__main__':
@@ -69,15 +162,25 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print('need dataset file')
         exit(1)
-    data_file_path = sys.argv[1]
+    arg_file_path = sys.argv[1]
 
     # Parsing Run Speed Argument
     if len(sys.argv) >= 3:
-        run_speed = float(sys.argv[2])
+        arg_run_speed = float(sys.argv[2])
     else:
-        run_speed = 0.01
+        arg_run_speed = 1
 
-    loader = FileLoader()
-    loader.setFilePath(data_file_path)
-    loader.setRunSpeed(run_speed)
-    loader.run()
+    # Parsing Save Path Argument
+    if len(sys.argv) >= 4:
+        arg_save_path = sys.argv[3]
+    else:
+        arg_save_path = None
+
+    loader = FileLoader(arg_file_path, arg_save_path, arg_run_speed)
+    try:
+        loader.run()
+    except:
+        loader.bRun = False
+        if loader.attackSocket is not None:
+            loader.attackSocket.close()
+        loader.attackServerSocket.close()

@@ -5,7 +5,6 @@ import sys
 import time
 import threading
 
-import numpy as np
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
@@ -24,56 +23,61 @@ class Loader(QThread):
     serverSocket.bind(ADDRESS)
 
     serverSocket.listen(1)
+    recvDataList = []
 
-    emitter = pyqtSignal(np.ndarray)
+    emitter = pyqtSignal(list)
     bRun = True
 
     @staticmethod
-    def RecvFunc(msg_list):
-        clientSocket = None
+    def RecvFunc(loader):
+        client_socket = None
         prev_data = ''
 
-        while Loader.bRun:
+        while loader.bRun:
             try:
-                encoded_packet = clientSocket.recv(Loader.BUFF_SIZE)
+                encoded_packet = client_socket.recv(loader.BUFF_SIZE)
+                if encoded_packet == b'':
+                    raise Exception('연결 끊김')
+
                 packet = encoded_packet.decode()
                 data_list = packet.splitlines()
+
+                if data_list == 0:
+                    continue
 
                 data_list[0] = prev_data + data_list[0]
                 prev_data = ''
 
                 for data in data_list[:-1]:
                     msg = data.split(',')
-                    msg_list.append(msg)
+                    loader.recvDataList.append(msg)
 
                 data = data_list[-1]
                 if packet[-1] != '\n':
                     prev_data = data
                 else:
                     msg = data.split(',')
-                    msg_list.append(msg)
+                    loader.recvDataList.append(msg)
 
-            except:
-                clientSocket, _ = Loader.serverSocket.accept()
+            except Exception as e:
+                if e != '[WinError 10054] 현재 연결은 원격 호스트에 의해 강제로 끊겼습니다':
+                    print(f'{e}')
+                client_socket, _ = Loader.serverSocket.accept()
 
     def run(self):
-        msg_list = []
-        t = threading.Thread(target=Loader.RecvFunc, args=(msg_list,))
+        t = threading.Thread(target=Loader.RecvFunc, args=(self,))
         t.start()
 
-        prev_emit_time = time.time()
-        while self.bRun:
-            if len(msg_list) > 0:
-                try:
-                    emit_msg = np.array(msg_list)
-                except:
-                    msg_list.clear()
-                    continue
-                msg_list.clear()
-                self.emitter.emit(emit_msg)
+        prev_emit_time = time.perf_counter()
 
-            elapse_time = time.time() - prev_emit_time
-            prev_emit_time = time.time()
+        while self.bRun:
+            msg_num = len(self.recvDataList)
+            if msg_num > 0:
+                self.emitter.emit(self.recvDataList[:msg_num])
+                self.recvDataList = self.recvDataList[msg_num:]
+
+            elapse_time = time.perf_counter() - prev_emit_time
+            prev_emit_time = time.perf_counter()
             if elapse_time < self.EMIT_INTERVAL:
                 time.sleep(self.EMIT_INTERVAL - elapse_time)
 
@@ -83,24 +87,31 @@ class Loader(QThread):
 class CANViewer(QWidget):
     ROW_MAX_LEN = 30
 
-    def __init__(self, color_maintain_len=3):
+    def __init__(self, color_maintain_time=3, init_time=60):
         '''CAN Viewer
 
         EMIT_INTERVAL = 0.1
         :param file_path: 읽을 CSV 파일
         :param run_speed: 출력 속도 (EMIT_INTERVAL 마다 EMIT_INTERVAL*run_speed 만큼 출력)
-        :param color_maintain_len: 변화한 데이터의 변화색 지속 시간 (EMIT_INTERVAL*color_maintain_len 만큼 지속)
+        :param color_maintain_time: 변화한 데이터의 변화색 지속 시간
         '''
         super().__init__()
         self.layout = None
         self.labelDic = {}
         self.columnIndex = 0
 
-        self.COLOR_MAINTAIN_LEN = color_maintain_len
-        self.valueChangedCount = {}
+        self.COLOR_MAINTAIN_TIME = color_maintain_time
+        self.textColorMaintainTime = {}
 
         self.printable = copy.deepcopy(string.printable)
         self.printable = self.printable[:self.printable.find('\t')]
+
+        self.BG_INIT_TIME = init_time
+        self.bgInitFlag = False
+        self.bgInitStartTime = -1
+        self.bgColorMaintainTime = {}
+        self.prevByte = {}
+        self.constFlag = {}
 
         self.loader = Loader()
         self.loader.emitter.connect(self.updatePacket)
@@ -113,25 +124,30 @@ class CANViewer(QWidget):
         self.setLayout(self.layout)
 
         self.setWindowTitle('CAN Viewer')
-        self.move(300, 300)
+        self.move(0, 0)
         self.resize(400, 200)
         self.show()
 
     def setLabelTextColor(self):
+        current_time = time.perf_counter()
+
         for id in self.labelDic:
+            data_label_list = self.labelDic[id][1]
 
-            label = self.labelDic[id]
-            for idx in range(len(self.valueChangedCount[id])):
-                self.valueChangedCount[id][idx] -= 1
-
-                if self.valueChangedCount[id][idx] > 0:
+            for idx in range(len(data_label_list)):
+                if self.textColorMaintainTime[id][idx] > current_time:
                     color = 'red'
                 else:
                     color = 'white'
+                
+                if id in self.bgColorMaintainTime and self.bgColorMaintainTime[id][idx] > current_time:
+                    bg_color = 'green'
+                else:
+                    bg_color = 'black'
+                
+                data_label_list[idx].setStyleSheet(f'color: {color}; background-color: {bg_color}')
 
-                label[1][idx].setStyleSheet(f'color: {color}')
-
-    @pyqtSlot(np.ndarray)
+    @pyqtSlot(list)
     def updatePacket(self, packet_list):
         for packet in packet_list:
             id = packet[1]
@@ -141,13 +157,42 @@ class CANViewer(QWidget):
             text = ''
             for byte in data.split(' '):
                 ch = chr(int('0x' + byte, 16))
+
                 if ch in self.printable:
                     text += ch
                 else:
                     text += '.'
 
+            # Background Color
+            if self.bgInitStartTime == -1:
+                self.bgInitStartTime = time.perf_counter()
+                self.bgInitFlag = False
+
+            # 데이터 변동 확인
+            if not self.bgInitFlag:
+                if id not in self.prevByte:
+                    maintain_end_time = self.bgInitStartTime + self.BG_INIT_TIME
+                    self.constFlag[id] = [True for _ in range(DLC)]
+                    self.bgColorMaintainTime[id] = [maintain_end_time for _ in range(DLC)]
+                else:
+                    for idx in range(DLC):
+                        if data_byte_list[idx] != self.prevByte[id][idx]:
+                            self.constFlag[id][idx] = False
+                self.prevByte[id] = data_byte_list
+
+                if time.perf_counter()-self.bgInitStartTime > self.BG_INIT_TIME:
+                    self.bgInitFlag = True
+
+            # 데이터 변동에 따라 배경색 변경
+            else:
+                if id in self.constFlag:
+                    maintain_end_time = time.perf_counter() + self.COLOR_MAINTAIN_TIME
+                    for idx in range(DLC):
+                        if self.constFlag[id][idx] and data_byte_list[idx] != self.prevByte[id][idx]:
+                            self.bgColorMaintainTime[id][idx] = maintain_end_time
+
+            # 새로운 컬럼 추가 및 포맷 정렬
             if id not in self.labelDic:
-                # 새로운 컬럼 추가
                 if len(self.labelDic) % self.ROW_MAX_LEN == 0:
                     id_label = QLabel('ID')
                     id_label.setStyleSheet("min-width: 40px")
@@ -182,8 +227,9 @@ class CANViewer(QWidget):
                 text_label = QLabel(text)
                 text_label.setStyleSheet("min-width: 100px")
 
+                maintain_end_time = time.perf_counter() + self.COLOR_MAINTAIN_TIME
                 self.labelDic[id] = [id_label, data_label_list, text_label]
-                self.valueChangedCount[id] = [self.COLOR_MAINTAIN_LEN for _ in range(DLC)]
+                self.textColorMaintainTime[id] = [maintain_end_time for _ in range(DLC)]
 
                 # 정렬 및 Reformat
                 keys = sorted(self.labelDic.keys())
@@ -196,11 +242,13 @@ class CANViewer(QWidget):
                     for i, data_label in enumerate(label[1]):
                         self.layout.addWidget(data_label, row, column + i+1)
                     self.layout.addWidget(label[2], row, column + 9)
+
+            # 텍스트 변경
             else:
-                # 텍스트 변경
+                maintain_end_time = time.perf_counter() + self.COLOR_MAINTAIN_TIME
                 for idx, data_label in enumerate(self.labelDic[id][1]):
-                    if data_label.text() != data_byte_list[idx]:
-                        self.valueChangedCount[id][idx] = self.COLOR_MAINTAIN_LEN
+                    if idx < len(data_byte_list) and data_label.text() != data_byte_list[idx]:
+                        self.textColorMaintainTime[id][idx] = maintain_end_time
                         data_label.setText(data_byte_list[idx])
 
                 text_label = self.labelDic[id][2]
@@ -210,12 +258,17 @@ class CANViewer(QWidget):
 
 
 if __name__ == '__main__':
-    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = './can_env/Lib/site-packages/PyQt5/Qt/plugins/platforms'
+    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = './venv/Lib/site-packages/PyQt5/Qt/plugins/platforms'
 
     app = QApplication(sys.argv)
     app.setStyleSheet('QWidget{ background-color: black } QLabel{ color: white }')
     app.setFont(QFont('Consolas', 10), "QLabel")
 
-    ex = CANViewer(color_maintain_len=3)
+    if len(sys.argv) >= 2:
+        init_time = int(sys.argv[1])
+    else:
+        init_time = 30
+
+    ex = CANViewer(color_maintain_time=3, init_time=init_time)
 
     sys.exit(app.exec_())
