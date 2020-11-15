@@ -148,15 +148,18 @@ class CANViewer(QWidget):
                     color = 'white'
 
                 if not self.valueInitFlag:
-                    bg_color = 'green'
+                    bg_color = 'green'  # 초기화 중
                 else:
-                    if id in self.bgColorMaintainTime and self.bgColorMaintainTime[id][idx] > current_time:
-                        if self.valueDelta[id][idx] == 0:
-                            bg_color = 'green'
+                    if id in self.bgColorMaintainTime:
+                        if self.bgColorMaintainTime[id][idx] > current_time:
+                            if self.valueDelta[id][idx] == 0:
+                                bg_color = 'green'  # 변하지 않던 값이 변함
+                            else:
+                                bg_color = '#FF8C00'  # 변동 값이 심해짐
                         else:
-                            bg_color = '#FF8C00'
+                            bg_color = 'black'  # 정상
                     else:
-                        bg_color = 'black'
+                        bg_color = '#3f0166'  # 이전에 존재하지 않던 ID
                 
                 data_label_list[idx].setStyleSheet(f'color: {color}; background-color: {bg_color}')
 
