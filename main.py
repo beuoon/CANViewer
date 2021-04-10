@@ -3,85 +3,40 @@ import os
 import string
 import sys
 import time
-import threading
+from Kvaser import Kvaser
 
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
-from socket import *
 
 
-class Loader(QThread):
+class KvaserLoader(QThread):
+    emitter = pyqtSignal(list)
     EMIT_INTERVAL = 0.1
 
-    HOST = ''
-    PORT = 45555
-    BUFF_SIZE = 1024
-    ADDRESS = (HOST, PORT)
-
-    serverSocket = socket(AF_INET, SOCK_STREAM)
-    serverSocket.bind(ADDRESS)
-
-    serverSocket.listen(1)
-    recvDataList = []
-
-    emitter = pyqtSignal(list)
-    bRun = True
-
-    @staticmethod
-    def RecvFunc(loader):
-        client_socket = None
-        prev_data = ''
-
-        while loader.bRun:
-            try:
-                encoded_packet = client_socket.recv(loader.BUFF_SIZE)
-                if encoded_packet == b'':
-                    raise Exception('연결 끊김')
-
-                packet = encoded_packet.decode()
-                data_list = packet.splitlines()
-
-                if data_list == 0:
-                    continue
-
-                data_list[0] = prev_data + data_list[0]
-                prev_data = ''
-
-                for data in data_list[:-1]:
-                    msg = data.split(',')
-                    loader.recvDataList.append(msg)
-
-                data = data_list[-1]
-                if packet[-1] != '\n':
-                    prev_data = data
-                else:
-                    msg = data.split(',')
-                    loader.recvDataList.append(msg)
-
-            except Exception as e:
-                if e != '[WinError 10054] 현재 연결은 원격 호스트에 의해 강제로 끊겼습니다':
-                    print(f'{e}')
-                client_socket, _ = Loader.serverSocket.accept()
-
     def run(self):
-        t = threading.Thread(target=Loader.RecvFunc, args=(self,))
-        t.start()
+        # Kvaser 생성
+        kvaser = Kvaser(channel=0)
+        if not kvaser.valid:
+            return
 
-        prev_emit_time = time.perf_counter()
+        # Load
+        prev_emit_time = 0
+        packet_list = []
 
-        while self.bRun:
-            msg_num = len(self.recvDataList)
-            if msg_num > 0:
-                self.emitter.emit(self.recvDataList[:msg_num])
-                self.recvDataList = self.recvDataList[msg_num:]
+        for frame in kvaser:
+            if frame == 0:
+                continue
+            elif frame is None:  # error 체크
+                break
+            data = ' '.join(['{:02X}'.format(val) for val in frame.data])
+            packet = [frame.timestamp / 1000000, '{:03X}'.format(frame.id), frame.dlc, data]
+            packet_list.append(packet)
 
-            elapse_time = time.perf_counter() - prev_emit_time
-            prev_emit_time = time.perf_counter()
-            if elapse_time < self.EMIT_INTERVAL:
-                time.sleep(self.EMIT_INTERVAL - elapse_time)
-
-        t.join()
+            if time.perf_counter() - prev_emit_time >= KvaserLoader.EMIT_INTERVAL:
+                self.emitter.emit(packet_list)
+                packet_list.clear()
+                prev_emit_time = time.perf_counter()
 
 
 class CANViewer(QWidget):
@@ -112,7 +67,7 @@ class CANViewer(QWidget):
         self.maxValue = {}
         self.valueDelta = {}
 
-        self.loader = Loader()
+        self.loader = KvaserLoader()
         self.loader.emitter.connect(self.updatePacket)
         self.loader.start()
 
@@ -167,12 +122,17 @@ class CANViewer(QWidget):
     def updatePacket(self, packet_list):
         for packet in packet_list:
             id = packet[1]
+            if len(id) < 3:
+                id = (3-len(id))*'0' + id
             DLC = int(packet[2])
             data = packet[3]
             data_byte_list = data.split(' ')
             text = ''
             for byte in data.split(' '):
-                ch = chr(int('0x' + byte, 16))
+                try:
+                    ch = chr(int('0x' + byte, 16))
+                except:
+                    ch = '.'
 
                 if ch in self.printable:
                     text += ch
@@ -210,7 +170,9 @@ class CANViewer(QWidget):
 
                         if delta > init_delta*1.2 or init_delta == 0 and max_value != curr_value:  # or max_value < curr_value:
                             self.bgColorMaintainTime[id][idx] = maintain_end_time
-            self.prevByte[id] = data_byte_list
+
+            if id not in self.prevByte or len(self.prevByte) == DLC:
+                self.prevByte[id] = data_byte_list
 
             # 새로운 컬럼 추가 및 포맷 정렬
             if id not in self.labelDic:
